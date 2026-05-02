@@ -1,16 +1,12 @@
 """
 inference.py — GNR Project Submission
-Few-Shot + Structured Output inference using Qwen3-VL-8B-Thinking.
+Qwen3-VL-8B-Thinking base model inference (no few-shot).
 
 Usage:
     python inference.py --test_dir <absolute_path_to_test_dir>
 
-The test_dir must contain:
-    - images/          folder with .png images
-    - test.csv         with columns: id, image_name, option (optional)
-
 Output:
-    submission.csv     in the current directory (not in test_dir)
+    submission.csv  in current directory with columns: image_name, option
 """
 
 import os
@@ -24,57 +20,22 @@ from PIL import Image
 from tqdm import tqdm
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-MODEL_DIR    = "./model_weights"     # pre-downloaded by setup.bash
-IMAGE_EXT    = ".png"
-OUTPUT_CSV   = "submission.csv"      # saved in current directory, not test_dir
+MODEL_DIR  = "./model_weights"
+IMAGE_EXT  = ".png"
+OUTPUT_CSV = "submission.csv"
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Maps numeric labels to letters (if test CSV has option column)
-LABEL_TO_LETTER = {"1": "A", "2": "B", "3": "C", "4": "D"}
+LETTER_TO_NUM = {"A": "1", "B": "2", "C": "3", "D": "4"}
 
-# ── Few-shot system prompt (real examples from training data) ──────────────────
-FEW_SHOT_EXAMPLES = """
-Here are some solved examples to guide you:
+SYSTEM_PROMPT = """You are an expert in Deep Learning. Given an image of an MCQ question with options A, B, C, D, read the question carefully, think step by step, and select the correct answer.
 
-Example 1:
-Question: An input image of size 64x64 is passed through:
-  - a convolution layer with kernel size 3x3, stride 2, and padding 1
-  - followed by max-pooling with kernel size 2
-What is the final spatial size of the output?
-Options: A) 16x16  B) 32x32  C) 8x8  D) 64x64
-Reasoning:
-  Step 1 - Conv: output = floor((64 - 3 + 2*1) / 2) + 1 = floor(63/2) + 1 = 32
-  Step 2 - Max-pool kernel 2, stride 2: output = 32 / 2 = 16
-  Final spatial size = 16x16
-Answer: A
-
-Example 2:
-Question: Which function is mathematically defined as (exp(x) - exp(-x)) / (exp(x) + exp(-x))?
-Options: A) Sigmoid  B) Tanh  C) ReLU  D) ELU
-Reasoning:
-  Sigmoid = 1/(1+exp(-x)) — does not match.
-  Tanh = (exp(x)-exp(-x))/(exp(x)+exp(-x)) — matches exactly.
-  ReLU = max(0,x) — does not match.
-  ELU uses exp only for negatives — does not match.
-Answer: B
-"""
-
-SYSTEM_PROMPT = f"""You are an expert in Deep Learning with strong skills in \
-reading and solving MCQ questions from images.
-
-When given an MCQ question image:
-1. Carefully read and extract the question text and all options (A, B, C, D)
-2. Think step by step through the problem
-3. Eliminate wrong options with reasoning
-4. Give your final answer
-{FEW_SHOT_EXAMPLES}
-Now answer the new MCQ question from the image. Respond ONLY in this JSON format:
-{{
+Respond ONLY in this JSON format:
+{
   "question": "<question text>",
-  "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+  "options": {"A": "...", "B": "...", "C": "...", "D": "..."},
   "answer": "<A|B|C|D>",
-  "reasoning": "<your step by step reasoning>"
-}}"""
+  "reasoning": "<brief step by step explanation>"
+}"""
 
 
 # ── Logits processor ───────────────────────────────────────────────────────────
@@ -92,14 +53,14 @@ class ConstrainedAtPosition(LogitsProcessor):
         return scores
 
 
-# ── Load model from local weights (no internet needed) ────────────────────────
+# ── Load model ─────────────────────────────────────────────────────────────────
 def load_model(model_dir: str):
     print(f"Loading model from {model_dir} ...")
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_dir,
         torch_dtype=torch.bfloat16,
         device_map="cuda",
-        local_files_only=True,    # no internet — use pre-downloaded weights
+        local_files_only=True,
     )
     processor = AutoProcessor.from_pretrained(
         model_dir,
@@ -139,6 +100,7 @@ def parse_answer(raw: str):
 ALLOWED_IDS  = [32, 33, 34, 35]   # A=32, B=33, C=34, D=35
 ID_TO_LETTER = {32: "A", 33: "B", 34: "C", 35: "D"}
 
+
 def run_inference(image_path: str, model, processor) -> str:
     image = Image.open(image_path).convert("RGB")
     image = image.resize((512, 512))
@@ -164,10 +126,10 @@ def run_inference(image_path: str, model, processor) -> str:
     if answer in ("A", "B", "C", "D"):
         return answer
 
-    # Pass 2: force A/B/C/D
-    after      = raw.split("assistant")[-1].strip() if "assistant" in raw.lower() else raw
-    after      = re.sub(r'<think>.*?</think>', '', after, flags=re.DOTALL).strip()
-    forced     = f"{after}\nThe answer is:"
+    # Pass 2: force A/B/C/D via logits processor
+    after       = raw.split("assistant")[-1].strip() if "assistant" in raw.lower() else raw
+    after       = re.sub(r'<think>.*?</think>', '', after, flags=re.DOTALL).strip()
+    forced      = f"{after}\nThe answer is:"
     messages_p2 = messages + [{"role": "assistant", "content": forced}]
     text2       = processor.apply_chat_template(messages_p2, tokenize=False, add_generation_prompt=False)
     text2       = text2.rstrip("<|im_end|>").rstrip()
@@ -184,14 +146,14 @@ def run_inference(image_path: str, model, processor) -> str:
     if new_token and new_token[0] in ID_TO_LETTER:
         return ID_TO_LETTER[new_token[0]]
 
-    return "ERROR"
+    return "A"   # safe default — never ERROR in submission
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="GNR Project Inference")
     parser.add_argument("--test_dir", type=str, required=True,
-                        help="Absolute path to test directory containing images/ and test.csv")
+                        help="Absolute path to test directory containing images/")
     parser.add_argument("--limit", type=int, default=None,
                         help="Run on first N samples only (for debugging)")
     args = parser.parse_args()
@@ -200,57 +162,54 @@ def main():
     image_dir = os.path.join(test_dir, "images")
     csv_path  = os.path.join(test_dir, "test.csv")
 
-    # Load test CSV
+    # ── Load test data ─────────────────────────────────────────────────────────
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
         print(f"Loaded test CSV: {len(df)} samples")
     else:
-        # No CSV — infer from images directory
         print(f"No test.csv found, reading images from {image_dir}")
-        image_files = sorted([
-            f.replace(IMAGE_EXT, "")
-            for f in os.listdir(image_dir)
-            if f.endswith(IMAGE_EXT)
-        ])
+        image_files = sorted(
+            [f.replace(IMAGE_EXT, "") for f in os.listdir(image_dir) if f.endswith(IMAGE_EXT)],
+            key=lambda x: int(re.search(r'\d+', x).group())
+        )
         df = pd.DataFrame({"image_name": image_files})
+        print(f"Found {len(df)} images")
 
     if args.limit:
         df = df.head(args.limit)
         print(f"Limited to {args.limit} samples")
 
-    # Load model
+    # ── Load model ─────────────────────────────────────────────────────────────
     model, processor = load_model(MODEL_DIR)
 
-    # Run inference
-    results = []
+    # ── Run inference ──────────────────────────────────────────────────────────
+    image_names, options = [], []
+
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Inference"):
         img_name = str(row["image_name"])
         img_path = os.path.join(image_dir, img_name + IMAGE_EXT)
 
-        predicted = "ERROR"
+        predicted_letter = "A"
         try:
-            predicted = run_inference(img_path, model, processor)
+            predicted_letter = run_inference(img_path, model, processor)
         except Exception as e:
             import traceback; traceback.print_exc()
             print(f"[WARN] {img_path}: {e}")
 
-        # Convert letter back to number for submission
-        letter_to_num = {"A": "1", "B": "2", "C": "3", "D": "4"}
-        predicted_num = letter_to_num.get(predicted, predicted)
+        image_names.append(img_name)
+        options.append(LETTER_TO_NUM.get(predicted_letter, "1"))
 
-        results.append({
-            "id":        row.get("id", img_name),
-            "image_name": img_name,
-            "predicted": predicted_num,
-        })
-
-    # Save submission.csv in current directory
-    submission_df = pd.DataFrame(results)
+    # ── Save submission.csv ────────────────────────────────────────────────────
+    submission_df = pd.DataFrame({
+        "image_name": image_names,
+        "option":     options,
+    })
     submission_df.to_csv(OUTPUT_CSV, index=False)
+
     print(f"\nSubmission saved -> {os.path.abspath(OUTPUT_CSV)}")
-    print(f"Total predictions: {len(submission_df)}")
-    print(f"Errors: {(submission_df['predicted'] == 'ERROR').sum()}")
-    print(submission_df["predicted"].value_counts().sort_index())
+    print(f"Total : {len(submission_df)}")
+    print(f"Distribution:")
+    print(submission_df["option"].value_counts().sort_index().to_string())
 
 
 if __name__ == "__main__":
