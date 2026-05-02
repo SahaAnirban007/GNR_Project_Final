@@ -201,6 +201,7 @@ def main():
 
     # ── Save submission.csv ────────────────────────────────────────────────────
     submission_df = pd.DataFrame({
+        "id":         image_names,   # id = image_name
         "image_name": image_names,
         "option":     options,
     })
